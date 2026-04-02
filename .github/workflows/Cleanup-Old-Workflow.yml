@@ -1,0 +1,94 @@
+name: Cleanup Old Workflow Runs
+
+on:
+  schedule:
+    - cron: '0 3 * * 5' # 每周一 UTC 03:00（北京时间 11:00）
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      # 1️⃣ Checkout 当前仓库
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          path: repo
+
+      # 2️⃣ 安装 gh CLI 和 jq
+      - name: Setup gh CLI
+        run: |
+          sudo apt update
+          sudo apt install -y gh jq
+
+      # 3️⃣ 清理 workflow runs + artifacts，并生成日志
+      - name: Cleanup old workflow runs and artifacts
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DAYS_TO_KEEP: 7
+          REPO: ${{ github.repository }}
+        run: |
+          cutoff=$(date -u -d "$DAYS_TO_KEEP days ago" +%Y-%m-%dT%H:%M:%SZ)
+          LOG_BODY=""
+
+          echo "📦 Cleaning old workflow runs..."
+          runs=$(gh api repos/$REPO/actions/runs --jq ".workflow_runs[] | select(.created_at < \"$cutoff\") | .id")
+          if [ -z "$runs" ]; then
+            LOG_BODY="$LOG_BODY\t• No old workflow runs to delete\n"
+          else
+            for run_id in $runs; do
+              gh api -X DELETE repos/$REPO/actions/runs/$run_id
+              LOG_BODY="$LOG_BODY\t• Deleted workflow run $run_id\n"
+            done
+          fi
+
+          echo "📦 Cleaning old artifacts..."
+          artifacts=$(gh api repos/$REPO/actions/artifacts --jq ".artifacts[] | select(.created_at < \"$cutoff\") | .id")
+          if [ -z "$artifacts" ]; then
+            LOG_BODY="$LOG_BODY\t• No old artifacts to delete\n"
+          else
+            for art_id in $artifacts; do
+              gh api -X DELETE repos/$REPO/actions/artifacts/$art_id
+              LOG_BODY="$LOG_BODY\t• Deleted artifact $art_id\n"
+            done
+          fi
+
+          # 生成新日志块（北京时间）
+          LOG="### Cleanup Log ($(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S'))\n$LOG_BODY"
+
+          README="repo/README.md"
+          if [ -f "$README" ]; then
+            CONTENT=$(cat "$README")
+          else
+            CONTENT=""
+          fi
+
+          # 将新日志追加到顶部
+          echo -e "$LOG\n$CONTENT" > tmp_readme.md
+
+          # 保留最多 50 条 Cleanup Log
+          awk '
+            BEGIN {count=0; max=50; RS="### Cleanup Log"; ORS=""}
+            NR==1 {head=$0; next}
+            {blocks[NR]=$0; count++}
+            END {
+              print head
+              start = (count>max)?(count-max+1):1
+              for(i=start;i<=count;i++) print "### Cleanup Log" blocks[i]
+            }
+          ' tmp_readme.md > "$README"
+
+          rm tmp_readme.md
+
+      # 4️⃣ 提交 README.md
+      - name: Commit README update
+        working-directory: repo
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git diff --cached --quiet || (git commit -m "🧹 Cleanup workflow runs & artifacts log" && git push origin HEAD:main)
