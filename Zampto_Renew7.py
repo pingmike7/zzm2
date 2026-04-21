@@ -288,6 +288,71 @@ def handle_turnstile(sb, idx: int, sid_f: str) -> bool:
     print("  [WARN] Turnstile 超时")
     return False
 
+def precheck_cf_turnstile(sb, idx: int) -> bool:
+    print(f"\n{'─'*40}")
+    print("  🛡️ 预处理 Cloudflare 验证 (首页盾)")
+    print(f"{'─'*40}")
+
+    try:
+        sb.uc_open_with_reconnect("https://zampto.net", reconnect_time=10)
+        time.sleep(5)
+
+        safe_screenshot(sb, shot(idx, "cf_homepage"))
+
+        # 检测是否进入 CF 验证页
+        is_cf_page = sb.execute_script('''
+            var body = document.body ? document.body.innerText : '';
+            if (body.includes('正在进行安全验证') ||
+                body.includes('Verify you are human') ||
+                body.includes('security check')) {
+                return true;
+            }
+
+            var cf = document.querySelector("input[name='cf-turnstile-response']");
+            return !!cf;
+        ''')
+
+        if not is_cf_page:
+            print("  ✅ 未检测到 CF 验证")
+            return True
+
+        print("  ⚠️ 检测到 CF 验证，开始处理...")
+
+        for attempt in range(5):
+            print(f"  🖱️ 点击验证 (第{attempt+1}次)...")
+
+            clicked = uc_click_with_timeout(sb, timeout=25)
+            time.sleep(4)
+
+            # 判断是否通过
+            passed = sb.execute_script('''
+                var cf = document.querySelector("input[name='cf-turnstile-response']");
+                if (cf && cf.value && cf.value.length > 20) return true;
+
+                var body = document.body ? document.body.innerText : '';
+                if (body.includes('验证成功') ||
+                    body.includes('success') ||
+                    body.includes('正在等待 zampto.net 响应')) {
+                    return true;
+                }
+                return false;
+            ''')
+
+            if passed:
+                print(f"  ✅ CF 验证通过 (第{attempt+1}次)")
+                time.sleep(3)
+                return True
+
+            if not clicked:
+                time.sleep(5)
+
+        print("  [WARN] CF 验证未通过")
+        return False
+
+    except Exception as e:
+        print(f"  [WARN] CF 预处理异常: {e}")
+        return False
+
 def scroll_and_get_renewal_info(sb) -> Tuple[str, str]:
     try:
         sb.execute_script("window.scrollTo(0, document.body.scrollHeight);")
@@ -776,6 +841,8 @@ def main():
             print("[INFO] 使用代理")
 
         with SB(**opts) as sb:
+            if not precheck_cf_turnstile(sb, 0):
+                print("[WARN] CF 首页验证失败，继续尝试登录...")
             for i, (u, p) in enumerate(accounts, 1):
                 r = process(sb, u, p, i)
                 results.append(r)
