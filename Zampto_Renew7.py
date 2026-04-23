@@ -715,6 +715,9 @@ def renew(sb, sid: str, idx: int, username: str) -> Dict[str, Any]:
     print(f"  🔄 续期: 🖥️ Zampto (id={sid_m})")
     print(f"{'─'*40}")
 
+    # =========================
+    # 🌐 打开服务器页面
+    # =========================
     sb.open(SERVER_URL.format(sid))
     time.sleep(5)
 
@@ -723,12 +726,16 @@ def renew(sb, sid: str, idx: int, username: str) -> Dict[str, Any]:
 
     safe_screenshot(sb, shot(idx, f"server_{sid_f}_loaded"))
 
-    # ✅ 读取时间（加等待，防止为空）
+    # =========================
+    # ⏱️ 等待时间加载（防止为空）
+    # =========================
     print("  ⏳ 等待时间加载...")
     old_renewal, old_remain = "", ""
-    for _ in range(10):
+
+    for i in range(10):
         old_renewal, old_remain = scroll_and_get_renewal_info(sb)
         if old_renewal and old_remain:
+            print(f"  ✅ 数据加载完成 ({i+1}s)")
             break
         time.sleep(1)
 
@@ -738,17 +745,20 @@ def renew(sb, sid: str, idx: int, username: str) -> Dict[str, Any]:
     old_dt = parse_renewal_datetime(old_renewal)
     result["old_expiry_cn"] = old_expiry_cn
 
-    # ✅ 点击 Renew
+    # =========================
+    # 🔘 点击续期按钮
+    # =========================
     print("  🔍 查找续期按钮...")
+
     clicked = sb.execute_script(f'''
-        (function() {{
+        return (function() {{
             var btn = document.querySelector('a[onclick*="handleServerRenewal"][onclick*="{sid}"]');
             if (btn) {{
                 btn.click();
                 return true;
             }}
             return false;
-        }})()
+        }})();
     ''')
 
     if not clicked:
@@ -758,33 +768,66 @@ def renew(sb, sid: str, idx: int, username: str) -> Dict[str, Any]:
 
     print("  ✅ 已点击续期按钮")
 
-    # ✅ 等弹窗出现（关键！！）
+    # =========================
+    # ⏳ 等待弹窗 / Turnstile 出现（修复 return 报错）
+    # =========================
     print("  ⏳ 等待弹窗出现...")
+
     modal_ready = False
     for i in range(15):
         modal_ready = sb.execute_script('''
-            var modal = document.getElementById('renewModal');
-            if (modal) {
-                var s = window.getComputedStyle(modal);
-                return s.display !== 'none' && s.visibility !== 'hidden';
-            }
-            return false;
+            return (function() {
+
+                // 1️⃣ modal
+                var modal = document.getElementById('renewModal');
+                if (modal) {
+                    var s = window.getComputedStyle(modal);
+                    if (s.display !== 'none' && s.visibility !== 'hidden') {
+                        return true;
+                    }
+                }
+
+                // 2️⃣ Turnstile iframe
+                var frames = document.querySelectorAll('iframe');
+                for (var i = 0; i < frames.length; i++) {
+                    var src = frames[i].src || '';
+                    if (src.includes('challenges.cloudflare') ||
+                        src.includes('turnstile')) {
+                        return true;
+                    }
+                }
+
+                // 3️⃣ 容器
+                if (document.querySelector('.cf-turnstile') ||
+                    document.querySelector('[data-sitekey]')) {
+                    return true;
+                }
+
+                return false;
+
+            })();
         ''')
+
         if modal_ready:
-            print(f"  ✅ 弹窗已出现 ({i+1}s)")
+            print(f"  ✅ 弹窗/验证已出现 ({i+1}s)")
             break
+
         time.sleep(1)
 
     if not modal_ready:
-        print("  [WARN] 弹窗未检测到，但继续")
+        print("  [WARN] 未检测到弹窗，但继续执行")
 
-    # ⭐⭐⭐ 关键：再等 10 秒（你要求的）
+    # =========================
+    # ⭐ 关键：强制等待 10 秒
+    # =========================
     print("  ⏳ 等待弹窗内容加载 (10秒)...")
     time.sleep(10)
 
     safe_screenshot(sb, shot(idx, f"server_{sid_f}_modal_ready"))
 
-    # ✅ 多次点击 Turnstile
+    # =========================
+    # 🔄 处理 Turnstile
+    # =========================
     print("  🔄 开始处理 Turnstile...")
 
     for attempt in range(5):
@@ -792,20 +835,23 @@ def renew(sb, sid: str, idx: int, username: str) -> Dict[str, Any]:
 
         clicked = uc_click_with_timeout(sb, timeout=25)
 
-        # ⭐ 点击后必须等
         time.sleep(5)
 
         passed = sb.execute_script('''
-            var cf = document.querySelector("input[name='cf-turnstile-response']");
-            if (cf && cf.value && cf.value.length > 20) return true;
+            return (function() {
 
-            var modal = document.getElementById('renewModal');
-            if (modal) {
-                var s = window.getComputedStyle(modal);
-                if (s.display === 'none') return true;
-            }
+                var cf = document.querySelector("input[name='cf-turnstile-response']");
+                if (cf && cf.value && cf.value.length > 20) return true;
 
-            return false;
+                var modal = document.getElementById('renewModal');
+                if (modal) {
+                    var s = window.getComputedStyle(modal);
+                    if (s.display === 'none') return true;
+                }
+
+                return false;
+
+            })();
         ''')
 
         if passed:
@@ -815,13 +861,17 @@ def renew(sb, sid: str, idx: int, username: str) -> Dict[str, Any]:
         if not clicked:
             time.sleep(6)
 
-    # ✅ 等提交完成
+    # =========================
+    # ⏳ 等待提交
+    # =========================
     print("  ⏳ 等待续期提交...")
     time.sleep(8)
 
     safe_screenshot(sb, shot(idx, f"server_{sid_f}_result"))
 
-    # ✅ 刷新确认
+    # =========================
+    # 🔄 刷新确认
+    # =========================
     print("  🔄 刷新页面确认...")
     sb.open(SERVER_URL.format(sid))
     time.sleep(5)
@@ -835,15 +885,21 @@ def renew(sb, sid: str, idx: int, username: str) -> Dict[str, Any]:
 
     result["new_expiry_cn"] = new_expiry_cn
 
+    # =========================
     # ✅ 判断是否成功
+    # =========================
+    renewed = False
+
     if old_dt and new_dt and new_dt > old_dt:
-        result["success"] = True
-    elif new_renewal != old_renewal:
-        result["success"] = True
+        renewed = True
+    elif new_renewal and old_renewal and new_renewal != old_renewal:
+        renewed = True
 
+    result["success"] = renewed
     result["expiry_info"] = f"{old_expiry_cn} -> {new_expiry_cn}"
+    result["message"] = "续期成功" if renewed else "续期失败"
 
-    print(f"  {'✅ 成功' if result['success'] else '❌ 失败'}")
+    print(f"  {'✅ 成功' if renewed else '❌ 失败'}")
 
     return result
 
