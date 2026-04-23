@@ -391,21 +391,36 @@ def precheck_cf_turnstile(sb, idx: int) -> bool:
 def scroll_and_get_renewal_info(sb) -> Tuple[str, str]:
     try:
         sb.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(1)
-    except: pass
+    except:
+        pass
 
     renewal_time, remain_time = "", ""
-    try:
-        renewal_time = sb.execute_script('''
-            var el = document.getElementById("lastRenewalTime");
-            return el ? el.textContent.trim() : "";
-        ''') or ""
-        remain_time = sb.execute_script('''
-            var el = document.getElementById("nextRenewalTime");
-            return el ? el.textContent.trim() : "";
-        ''') or ""
-    except: pass
 
+    print("  ⏳ 等待服务器数据加载...")
+
+    for i in range(20):
+        try:
+            renewal_time = sb.execute_script('''
+                var el = document.getElementById("lastRenewalTime");
+                return el ? el.textContent.trim() : "";
+            ''') or ""
+
+            remain_time = sb.execute_script('''
+                var el = document.getElementById("nextRenewalTime");
+                return el ? el.textContent.trim() : "";
+            ''') or ""
+
+            # ⭐ 关键：必须有内容才算成功
+            if remain_time and "day" in remain_time:
+                print(f"  ✅ 数据加载完成 ({i+1}s)")
+                return renewal_time, remain_time
+
+        except:
+            pass
+
+        time.sleep(1)
+
+    print("  [WARN] 未获取到剩余时间（页面可能未加载）")
     return renewal_time, remain_time
 
 def login(sb, user: str, pwd: str, idx: int) -> Tuple[bool, Optional[str]]:
