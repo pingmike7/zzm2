@@ -79,7 +79,7 @@ def shot(idx: int, name: str) -> str:
 def safe_screenshot(sb, path: str):
     try:
         sb.save_screenshot(path)
-        print(f"  📸 截图 → {Path(path).name}")
+        print(f"  [INFO] 截图 → {Path(path).name}")
     except Exception as e:
         print(f"  [WARN] 截图失败: {e}")
 
@@ -96,7 +96,7 @@ def notify(ok: bool, username: str, server_id: str, expiry_info: str, img: str =
         else:
             requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
                 json={"chat_id": chat, "text": text}, timeout=30)
-        print("  ✅ TG推送成功")
+        print("  [INFO] TG推送成功")
     except Exception as e:
         print(f"  [WARN] TG推送失败: {e}")
 
@@ -188,6 +188,85 @@ def dismiss_cookie_only(sb) -> bool:
     except: pass
     return False
 
+# Cloudflare 整页挑战处理
+def is_cloudflare_interstitial(sb) -> bool:
+    """
+    检测是否处于 Cloudflare 整页挑战页面（非嵌入式 Turnstile）
+    """
+    try:
+        # 排除已经显示登录表单的情况（说明是内嵌 Turnstile，不是整页挑战）
+        has_login_form = sb.execute_script('''
+            return !!(document.querySelector('input[name="identifier"]')
+                   || document.querySelector('input[type="email"]')
+                   || document.querySelector('button[type="submit"]'));
+        ''')
+        if has_login_form:
+            return False
+
+        # 排除已经登录成功的情况
+        current_url = sb.get_current_url()
+        if "dash.zampto.net" in current_url:
+            return False
+
+        # 检测 CF 整页挑战的强特征
+        page_source = sb.get_page_source()
+        title = sb.get_title().lower() if sb.get_title() else ""
+
+        strong_indicators = [
+            "Just a moment",
+            "Verify you are human",
+            "Checking your browser",
+            "Checking if the site connection is secure",
+        ]
+        for indicator in strong_indicators:
+            if indicator in page_source:
+                return True
+
+        if "just a moment" in title or "attention required" in title:
+            return True
+
+        # 页面内容极少且包含 CF 域名
+        body_text_len = sb.execute_script('''
+            return (document.body && document.body.innerText) ? document.body.innerText.trim().length : 0;
+        ''')
+        if body_text_len < 100 and "challenges.cloudflare.com" in page_source:
+            return True
+
+        return False
+    except:
+        return False
+
+def bypass_cloudflare_interstitial(sb, idx: int, max_attempts: int = 3) -> bool:
+    """绕过 Cloudflare 整页挑战，多次尝试点击并通过"""
+    print("  [INFO] 检测到 Cloudflare 整页挑战，尝试绕过...")
+    safe_screenshot(sb, shot(idx, "cf_interstitial_start"))
+
+    for attempt in range(max_attempts):
+        print(f"  [INFO] CF 绕过尝试 {attempt + 1}/{max_attempts}")
+        try:
+            sb.uc_gui_click_captcha()
+            time.sleep(6)
+            if not is_cloudflare_interstitial(sb):
+                print("  [INFO] Cloudflare 整页挑战已通过")
+                return True
+        except Exception as e:
+            print(f"  [WARN] 尝试 {attempt + 1} 异常: {e}")
+        time.sleep(3)
+
+    # 最后尝试刷新页面
+    print("  [INFO] 尝试刷新页面重新加载...")
+    try:
+        sb.uc_open_with_reconnect(AUTH_URL, reconnect_time=10)
+        time.sleep(5)
+        if not is_cloudflare_interstitial(sb):
+            print("  [INFO] 刷新后 Cloudflare 挑战消失")
+            return True
+    except:
+        pass
+
+    print("  [ERROR] Cloudflare 整页挑战绕过失败")
+    return False
+
 def check_renew_modal_open(sb) -> bool:
     try:
         return bool(sb.execute_script('''
@@ -231,7 +310,7 @@ def uc_click_with_timeout(sb, timeout: int = 20) -> bool:
     try:
         sb.uc_gui_click_captcha()
         signal.alarm(0)
-        print(f"  ✅ 坐标点击成功")
+        print(f"  [INFO] 坐标点击成功")
         return True
     except ClickTimeout:
         print(f"  [WARN] 点击超时 ({timeout}s)")
@@ -243,8 +322,108 @@ def uc_click_with_timeout(sb, timeout: int = 20) -> bool:
         signal.alarm(0)
         signal.signal(signal.SIGALRM, old_handler)
 
+def handle_social_prompt(sb, idx: int) -> bool:
+    """处理登录后的社交媒体提示页面，点击 Continue 按钮跳过。"""
+    try:
+        current_url = sb.get_current_url()
+        if "dash.zampto.net" not in current_url:
+            return False
+
+        has_continue = sb.execute_script('''
+            (function() {
+                var forms = document.querySelectorAll('form');
+                for (var i = 0; i < forms.length; i++) {
+                    var input = forms[i].querySelector(
+                        'input[name="action"][value="continue_from_social_prompt"]'
+                    );
+                    if (input) {
+                        var btn = forms[i].querySelector('button[type="submit"]');
+                        if (btn) return true;
+                    }
+                }
+                var btn = document.querySelector('button.continue-btn');
+                if (btn && btn.textContent.trim() === 'Continue') return true;
+                return false;
+            })()
+        ''')
+
+        if not has_continue:
+            return False
+
+        print("  [INFO] 检测到社交媒体提示页面，点击 Continue...")
+        safe_screenshot(sb, shot(idx, "social_prompt"))
+
+        clicked = sb.execute_script('''
+            (function() {
+                var forms = document.querySelectorAll('form');
+                for (var i = 0; i < forms.length; i++) {
+                    var input = forms[i].querySelector(
+                        'input[name="action"][value="continue_from_social_prompt"]'
+                    );
+                    if (input) {
+                        var btn = forms[i].querySelector('button[type="submit"]');
+                        if (btn) {
+                            btn.click();
+                            return "form_submit";
+                        }
+                        forms[i].submit();
+                        return "form_direct";
+                    }
+                }
+                var btn = document.querySelector('button.continue-btn');
+                if (btn) {
+                    btn.click();
+                    return "class_click";
+                }
+                return "";
+            })()
+        ''')
+
+        if clicked:
+            print(f"  [INFO] 已点击 Continue 按钮 (方式: {clicked})")
+            time.sleep(5)
+
+            still_prompt = sb.execute_script('''
+                var input = document.querySelector(
+                    'input[name="action"][value="continue_from_social_prompt"]'
+                );
+                return !!input;
+            ''')
+
+            if not still_prompt:
+                print("  [INFO] 已跳过社交媒体提示页面")
+                return True
+            else:
+                print("  [WARN] 仍在社交媒体提示页面，尝试表单提交...")
+                try:
+                    sb.execute_script('''
+                        var forms = document.querySelectorAll('form');
+                        for (var i = 0; i < forms.length; i++) {
+                            var input = forms[i].querySelector(
+                                'input[name="action"][value="continue_from_social_prompt"]'
+                            );
+                            if (input) {
+                                forms[i].submit();
+                                break;
+                            }
+                        }
+                    ''')
+                    time.sleep(5)
+                    print("  [INFO] 表单已提交")
+                    return True
+                except Exception as e:
+                    print(f"  [WARN] 表单提交失败: {e}")
+                    return False
+        else:
+            print("  [WARN] 未能点击 Continue 按钮")
+            return False
+
+    except Exception as e:
+        print(f"  [WARN] 处理社交提示页面异常: {e}")
+        return False
+
 def handle_turnstile(sb, idx: int, sid_f: str) -> bool:
-    print("  ⏳ 等待 Turnstile...")
+    print("  [INFO] 等待 Turnstile...")
     time.sleep(2)
 
     dismiss_cookie_only(sb)
@@ -254,17 +433,17 @@ def handle_turnstile(sb, idx: int, sid_f: str) -> bool:
     print(f"  [INFO] 续期弹窗: {'已打开' if modal_open else '未检测到'}")
 
     if check_turnstile_done(sb):
-        print("  ✅ Turnstile 已完成")
+        print("  [INFO] Turnstile 已完成")
         return True
 
-    print("  🔄 处理 Turnstile 验证...")
+    print("  [INFO] 处理 Turnstile 验证...")
     for attempt in range(3):
-        print(f"  🖱️ 坐标计算完成 (第{attempt+1}次)")
+        print(f"  [INFO] 坐标计算完成 (第{attempt+1}次)")
         clicked = uc_click_with_timeout(sb, timeout=20)
         time.sleep(3)
 
         if check_turnstile_done(sb):
-            print(f"  ✅ Turnstile 通过 (第{attempt+1}次)")
+            print(f"  [INFO] Turnstile 通过 (第{attempt+1}次)")
             return True
 
         if not check_renew_modal_open(sb):
@@ -274,11 +453,11 @@ def handle_turnstile(sb, idx: int, sid_f: str) -> bool:
         if not clicked:
             time.sleep(5)
 
-    print("  ⏳ 等待续期结果...")
+    print("  [INFO] 等待续期结果...")
     start = time.time()
     while time.time() - start < 30:
         if check_turnstile_done(sb):
-            print(f"  ✅ 检测到续期结果！")
+            print(f"  [INFO] 检测到续期结果")
             return True
         if not check_renew_modal_open(sb):
             print(f"  [INFO] 弹窗已关闭")
@@ -288,158 +467,36 @@ def handle_turnstile(sb, idx: int, sid_f: str) -> bool:
     print("  [WARN] Turnstile 超时")
     return False
 
-def precheck_cf_turnstile(sb, idx: int) -> bool:
-    print(f"\n{'─'*40}")
-    print("  🛡️ 预处理 Cloudflare 验证 (首页盾)")
-    print(f"{'─'*40}")
-
-    try:
-        sb.uc_open_with_reconnect("https://zampto.net", reconnect_time=10)
-        time.sleep(3)
-
-        safe_screenshot(sb, shot(idx, "cf_homepage"))
-
-        # 是否 CF 页面
-        is_cf_page = sb.execute_script('''
-            var body = document.body ? document.body.innerText : '';
-            return body.includes('正在进行安全验证') ||
-                   body.includes('Verify you are human') ||
-                   document.querySelector("input[name='cf-turnstile-response']");
-        ''')
-
-        if not is_cf_page:
-            print("  ✅ 未检测到 CF 验证")
-            return True
-
-        print("  ⚠️ 检测到 CF 验证页面")
-
-        # ✅ 等“页面稳定”而不是 iframe
-        print("  ⏳ 等待页面稳定...")
-        for i in range(20):
-            ready = sb.execute_script('''
-                var loading = document.querySelector('.loading-verifying');
-                if (loading && loading.style.display !== 'none') return false;
-
-                var body = document.body ? document.body.innerText : '';
-                if (body.includes('正在进行安全验证')) return false;
-
-                return true;
-            ''')
-
-            if ready:
-                print(f"  ✅ 页面已稳定 ({i+1}s)")
-                break
-
-            time.sleep(1)
-        else:
-            print("  [WARN] 页面一直未稳定，但继续尝试点击")
-
-        # ⭐ 关键：再额外等一会（你说的5~6秒）
-        print("  ⏳ 额外等待 6 秒...")
-        time.sleep(6)
-
-        safe_screenshot(sb, shot(idx, "cf_ready"))
-
-        # 是否已经通过
-        already_done = sb.execute_script('''
-            var cf = document.querySelector("input[name='cf-turnstile-response']");
-            return cf && cf.value && cf.value.length > 20;
-        ''')
-
-        if already_done:
-            print("  ✅ CF 已自动通过")
-            return True
-
-        # ✅ 开始点击（重点：多次点击 + 等待）
-        for attempt in range(6):
-            print(f"  🖱️ 点击验证 (第{attempt+1}次)...")
-
-            clicked = uc_click_with_timeout(sb, timeout=25)
-
-            # ⭐ 点击后要等久一点（CF处理时间）
-            time.sleep(5)
-
-            passed = sb.execute_script('''
-                var cf = document.querySelector("input[name='cf-turnstile-response']");
-                if (cf && cf.value && cf.value.length > 20) return true;
-
-                var body = document.body ? document.body.innerText : '';
-                if (body.includes('验证成功') ||
-                    body.includes('正在等待 zampto.net 响应')) {
-                    return true;
-                }
-
-                return false;
-            ''')
-
-            if passed:
-                print(f"  ✅ CF 验证通过 (第{attempt+1}次)")
-                time.sleep(3)
-                return True
-
-            # 点击失败 → 等更久
-            if not clicked:
-                time.sleep(6)
-
-        print("  [WARN] CF 验证未通过")
-        return False
-
-    except Exception as e:
-        print(f"  [WARN] CF 预处理异常: {e}")
-        return False
-
 def scroll_and_get_renewal_info(sb) -> Tuple[str, str]:
     try:
         sb.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-    except:
-        pass
+        time.sleep(1)
+    except: pass
 
     renewal_time, remain_time = "", ""
+    try:
+        renewal_time = sb.execute_script('''
+            var el = document.getElementById("lastRenewalTime");
+            return el ? el.textContent.trim() : "";
+        ''') or ""
+        remain_time = sb.execute_script('''
+            var el = document.getElementById("nextRenewalTime");
+            return el ? el.textContent.trim() : "";
+        ''') or ""
+    except: pass
 
-    print("  ⏳ 等待服务器数据加载...")
-
-    for i in range(20):
-        try:
-            renewal_time = sb.execute_script('''
-                var el = document.getElementById("lastRenewalTime");
-                return el ? el.textContent.trim() : "";
-            ''') or ""
-
-            remain_time = sb.execute_script('''
-                var el = document.getElementById("nextRenewalTime");
-                return el ? el.textContent.trim() : "";
-            ''') or ""
-
-            # ⭐ 关键：必须有内容才算成功
-            if remain_time and "day" in remain_time:
-                print(f"  ✅ 数据加载完成 ({i+1}s)")
-                return renewal_time, remain_time
-
-        except:
-            pass
-
-        time.sleep(1)
-
-    print("  [WARN] 未获取到剩余时间（页面可能未加载）")
     return renewal_time, remain_time
 
 def login(sb, user: str, pwd: str, idx: int) -> Tuple[bool, Optional[str]]:
     print(f"\n{'─'*40}")
-    print(f"  🔐 验证出口 IP...")
+    print(f"  [INFO] 验证出口 IP...")
     try:
-        proxy = os.environ.get("PROXY_SOCKS5", "")
-        proxies = {"http": proxy, "https": proxy} if proxy else None
-        ip_info = requests.get(
-            "https://api.ipify.org?format=json",
-            proxies=proxies,
-            timeout=10
-        ).json()
-        print(f"  ✅ 出口IP确认: {ip_info}")
-    except Exception as e:
-        print(f"  [WARN] IP检测失败: {e}")
+        ip_info = requests.get("https://api.ipify.org?format=json", timeout=10).json()
+        print(f"  [INFO] 出口IP确认: {ip_info}")
+    except: pass
 
     print(f"\n{'─'*40}")
-    print(f"  🌐 访问登录页...")
+    print(f"  [INFO] 访问登录页...")
     last_shot = None
 
     for attempt in range(3):
@@ -447,14 +504,26 @@ def login(sb, user: str, pwd: str, idx: int) -> Tuple[bool, Optional[str]]:
             sb.uc_open_with_reconnect(AUTH_URL, reconnect_time=10)
             time.sleep(5)
 
+            # 检测并处理 Cloudflare 整页挑战
+            if is_cloudflare_interstitial(sb):
+                if not bypass_cloudflare_interstitial(sb, idx):
+                    last_shot = shot(idx, "cf_interstitial_failed")
+                    safe_screenshot(sb, last_shot)
+                    if attempt < 2:
+                        continue
+                    return False, last_shot
+                # 挑战通过后，等待页面跳转到登录表单
+                time.sleep(4)
+
             if "dash.zampto.net" in sb.get_current_url():
-                print("  ✅ 登录成功!")
+                print("  [INFO] 已登录，跳转到仪表盘")
+                handle_social_prompt(sb, idx)
                 return True, None
 
             last_shot = shot(idx, f"login-{attempt}")
             safe_screenshot(sb, last_shot)
 
-            print("  ✏️ 填写账号密码...")
+            print("  [INFO] 填写账号密码...")
             for _ in range(10):
                 if "identifier" in sb.get_page_source(): break
                 time.sleep(2)
@@ -476,7 +545,7 @@ def login(sb, user: str, pwd: str, idx: int) -> Tuple[bool, Optional[str]]:
             try: sb.click('button[type="submit"]')
             except: sb.click("button")
 
-            print("  ⏳ 等待密码页面...")
+            print("  [INFO] 等待密码页面...")
             for _ in range(15):
                 try:
                     if sb.is_element_visible('input[name="password"]') or sb.is_element_visible('input[type="password"]'):
@@ -522,18 +591,19 @@ def login(sb, user: str, pwd: str, idx: int) -> Tuple[bool, Optional[str]]:
             print(f"  [INFO] 密码页面 Turnstile 预检: {'存在' if has_turnstile_before else '未检测到'}")
 
             # 点击继续触发 Turnstile（如果还没出现）或提交
-            print("  🖱️ 点击继续...")
+            print("  [INFO] 点击继续...")
             try: sb.click('button[type="submit"]')
             except:
                 try: sb.click("button")
                 except: pass
 
             # 等待 Turnstile 出现（点击前已有或点击后出现）
-            print("  ⏳ 等待 Turnstile 加载...")
+            print("  [INFO] 等待 Turnstile 加载...")
             turnstile_appeared = False
             for _ in range(20):
                 if "dash.zampto.net" in sb.get_current_url():
-                    print("  ✅ 登录成功!")
+                    print("  [INFO] 登录成功")
+                    handle_social_prompt(sb, idx)
                     return True, None
 
                 has_turnstile = sb.execute_script('''
@@ -562,12 +632,12 @@ def login(sb, user: str, pwd: str, idx: int) -> Tuple[bool, Optional[str]]:
                 ''')
                 if has_turnstile:
                     turnstile_appeared = True
-                    print("  ✅ Turnstile 已检测到")
+                    print("  [INFO] Turnstile 已检测到")
                     break
                 time.sleep(1)
 
             if turnstile_appeared:
-                print("  🔄 处理登录页 Turnstile 验证...")
+                print("  [INFO] 处理登录页 Turnstile 验证...")
                 time.sleep(3)
 
                 # 先检查是否已经自动通过
@@ -576,15 +646,16 @@ def login(sb, user: str, pwd: str, idx: int) -> Tuple[bool, Optional[str]]:
                     return cf && cf.value && cf.value.length > 20;
                 ''')
                 if already_done:
-                    print("  ✅ Turnstile 已自动完成")
+                    print("  [INFO] Turnstile 已自动完成")
                 else:
                     for t_attempt in range(4):
-                        print(f"  🖱️ 点击 Turnstile (第{t_attempt+1}次)...")
+                        print(f"  [INFO] 点击 Turnstile (第{t_attempt+1}次)...")
                         clicked = uc_click_with_timeout(sb, timeout=25)
                         time.sleep(4)
 
                         if "dash.zampto.net" in sb.get_current_url():
-                            print("  ✅ 登录成功!")
+                            print("  [INFO] 登录成功")
+                            handle_social_prompt(sb, idx)
                             return True, None
 
                         done = sb.execute_script('''
@@ -595,34 +666,36 @@ def login(sb, user: str, pwd: str, idx: int) -> Tuple[bool, Optional[str]]:
                             return false;
                         ''')
                         if done:
-                            print(f"  ✅ Turnstile 通过 (第{t_attempt+1}次)")
+                            print(f"  [INFO] Turnstile 通过 (第{t_attempt+1}次)")
                             break
                         if not clicked:
                             time.sleep(5)
                     else:
                         # 最后等待自动完成
-                        print("  ⏳ 等待 Turnstile 自动完成 (30s)...")
+                        print("  [INFO] 等待 Turnstile 自动完成 (30s)...")
                         for _ in range(30):
                             if "dash.zampto.net" in sb.get_current_url():
-                                print("  ✅ 登录成功!")
+                                print("  [INFO] 登录成功")
+                                handle_social_prompt(sb, idx)
                                 return True, None
                             done = sb.execute_script('''
                                 var cf = document.querySelector("input[name='cf-turnstile-response']");
                                 return cf && cf.value && cf.value.length > 20;
                             ''')
                             if done:
-                                print("  ✅ Turnstile 已完成")
+                                print("  [INFO] Turnstile 已完成")
                                 break
                             time.sleep(1)
 
-            print("  ⏳ 等待登录跳转...")
+            print("  [INFO] 等待登录跳转...")
             time.sleep(8)
 
             last_shot = shot(idx, "login_result")
             safe_screenshot(sb, last_shot)
 
             if "dash.zampto.net" in sb.get_current_url() or "sign-in" not in sb.get_current_url():
-                print("  ✅ 登录成功!")
+                print("  [INFO] 登录成功")
+                handle_social_prompt(sb, idx)
                 return True, last_shot
 
         except Exception as e:
@@ -644,6 +717,10 @@ def get_servers(sb, idx: int) -> Tuple[List[Dict[str, str]], str, Optional[str]]
 
     sb.open(DASHBOARD_URL)
     time.sleep(5)
+
+    handle_social_prompt(sb, idx)
+    time.sleep(2)
+
     inject_ad_guard(sb)
     dismiss_cookie_only(sb)
 
@@ -685,8 +762,13 @@ def get_servers(sb, idx: int) -> Tuple[List[Dict[str, str]], str, Optional[str]]
         print("  [INFO] 回退到页面解析...")
         sb.open(OVERVIEW_URL)
         time.sleep(3)
+
+        handle_social_prompt(sb, idx)
+        time.sleep(2)
+
         inject_ad_guard(sb)
         dismiss_cookie_only(sb)
+
         for sid in re.findall(r"/server\?id=(\d+)", sb.get_page_source()):
             if sid not in seen:
                 seen.add(sid)
@@ -707,12 +789,16 @@ def renew(sb, sid: str, idx: int, username: str) -> Dict[str, Any]:
     sid_f = safe_sid_for_filename(sid)
 
     print(f"\n{'─'*40}")
-    print(f"  🔄 续期: 🖥️ Zampto (id={sid_m})")
-    print(f"\n{'─'*40}")
-    print(f"  🌐 访问: https://dash.zampto.net/server?id={sid_m}")
+    print(f"  [INFO] 续期: 服务器 (id={sid_m})")
+    print(f"{'─'*40}")
+    print(f"  [INFO] 访问: https://dash.zampto.net/server?id={sid_m}")
 
     sb.open(SERVER_URL.format(sid))
     time.sleep(4)
+
+    handle_social_prompt(sb, idx)
+    time.sleep(2)
+
     inject_ad_guard(sb)
     dismiss_cookie_only(sb)
 
@@ -728,9 +814,9 @@ def renew(sb, sid: str, idx: int, username: str) -> Dict[str, Any]:
     old_expiry_cn = calc_expiry_time(old_renewal)
     old_dt = parse_renewal_datetime(old_renewal)
     result["old_expiry_cn"] = old_expiry_cn
-    print(f"  ⏱️ 当前剩余时间: {old_remain}")
+    print(f"  [INFO] 当前剩余时间: {old_remain}")
 
-    print("  🔍 查找续期按钮...")
+    print("  [INFO] 查找续期按钮...")
     try:
         clicked = sb.execute_script(f'''
             (function() {{
@@ -760,7 +846,7 @@ def renew(sb, sid: str, idx: int, username: str) -> Dict[str, Any]:
             notify(False, username, sid, result["expiry_info"])
             return result
 
-        print(f"  ✅ 已点击续期按钮 (方式: {clicked})")
+        print(f"  [INFO] 已点击续期按钮 (方式: {clicked})")
     except Exception as e:
         result["message"] = f"点击失败: {e}"
         return result
@@ -773,9 +859,13 @@ def renew(sb, sid: str, idx: int, username: str) -> Dict[str, Any]:
     safe_screenshot(sb, shot(idx, f"server_{sid_f}_result"))
     result["screenshot"] = shot(idx, f"server_{sid_f}_result")
 
-    print("  🔄 刷新页面确认续期时间...")
+    print("  [INFO] 刷新页面确认续期时间...")
     sb.open(SERVER_URL.format(sid))
     time.sleep(4)
+
+    handle_social_prompt(sb, idx)
+    time.sleep(2)
+
     inject_ad_guard(sb)
     dismiss_cookie_only(sb)
 
@@ -783,7 +873,7 @@ def renew(sb, sid: str, idx: int, username: str) -> Dict[str, Any]:
     new_expiry_cn = calc_expiry_time(new_renewal)
     new_dt = parse_renewal_datetime(new_renewal)
     result["new_expiry_cn"] = new_expiry_cn
-    print(f"  ⏱️ 续期后剩余时间: {new_remain}")
+    print(f"  [INFO] 续期后剩余时间: {new_remain}")
 
     final_shot = shot(idx, f"server_{sid_f}_final")
     safe_screenshot(sb, final_shot)
@@ -806,16 +896,16 @@ def renew(sb, sid: str, idx: int, username: str) -> Dict[str, Any]:
     if renewed:
         result["success"] = True
         result["expiry_info"] = f"{old_expiry_cn} -> {new_expiry_cn}"
-        result["message"] = "续期成功！"
+        result["message"] = "续期成功"
     else:
         result["success"] = False
         result["expiry_info"] = f"{old_expiry_cn} (未更新)"
         result["message"] = "续期失败：时间未变化" if old_renewal == new_renewal else "续期失败：无法确认"
 
     notify(result["success"], username, sid, result["expiry_info"], final_shot)
-    print(f"  {'✅' if result['success'] else '❌'} {result['message']}")
+    print(f"  {'[INFO]' if result['success'] else '[ERROR]'} {result['message']}")
     return result
-    
+
 def process(sb, user: str, pwd: str, idx: int) -> Dict[str, Any]:
     result = {"username": user, "success": False, "message": "", "servers": []}
 
@@ -864,13 +954,8 @@ def main():
     proxy = os.environ.get("PROXY_SOCKS5", "")
     if proxy:
         try:
-            proxies = {"http": proxy, "https": proxy}
-            ip_info = requests.get(
-                "https://api.ipify.org?format=json",
-                proxies=proxies,
-                timeout=10
-            ).json()
-            print(f"[INFO] 代理连接正常，出口IP: {ip_info}")
+            requests.get("https://api.ipify.org", proxies={"http": proxy, "https": proxy}, timeout=10)
+            print("[INFO] 代理连接正常")
         except Exception as e:
             print(f"[WARN] 代理测试失败: {e}")
 
@@ -891,8 +976,6 @@ def main():
             print("[INFO] 使用代理")
 
         with SB(**opts) as sb:
-            if not precheck_cf_turnstile(sb, 0):
-                print("[WARN] CF 首页验证失败，继续尝试登录...")
             for i, (u, p) in enumerate(accounts, 1):
                 r = process(sb, u, p, i)
                 results.append(r)
@@ -910,11 +993,13 @@ def main():
     ok_srv = sum(sum(1 for s in r.get("servers", []) if s.get("success")) for r in results)
 
     print(f"\n{'='*40}")
-    print(f"📊 账号: {ok_acc}/{len(results)} | 服务器: {ok_srv}/{total_srv}")
+    print(f"[INFO] 账号: {ok_acc}/{len(results)} | 服务器: {ok_srv}/{total_srv}")
     for r in results:
-        print(f"{'✅' if r.get('success') else '❌'} {mask(r['username'])}: {r.get('message', '')}")
+        status = "[INFO]" if r.get("success") else "[ERROR]"
+        print(f"{status} {mask(r['username'])}: {r.get('message', '')}")
         for s in r.get("servers", []):
-            print(f"  {'✓' if s.get('success') else '✗'} {mask_id(s['server_id'])}: {s.get('message', '')}")
+            s_status = "[INFO]" if s.get("success") else "[ERROR]"
+            print(f"  {s_status} {mask_id(s['server_id'])}: {s.get('message', '')}")
     print(f"{'='*40}")
 
     sys.exit(0 if ok_srv > 0 else 1)
