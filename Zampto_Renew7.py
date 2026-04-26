@@ -236,7 +236,7 @@ def is_cloudflare_interstitial(sb) -> bool:
     except:
         return False
 
-def bypass_cloudflare_interstitial(sb, idx: int, max_attempts: int = 3) -> bool:
+def bypass_cloudflare_interstitial(sb, idx: int, max_attempts: int = 6) -> bool:
     """绕过 Cloudflare 整页挑战，多次尝试点击并通过"""
     print("  [INFO] 检测到 Cloudflare 整页挑战，尝试绕过...")
     safe_screenshot(sb, shot(idx, "cf_interstitial_start"))
