@@ -29,20 +29,53 @@ def cn_now() -> datetime:
 def calc_expiry_time(renewal_time_str: str, minutes: int = 2880) -> str:
     if not renewal_time_str:
         return "未知"
-    try:
-        dt = datetime.strptime(renewal_time_str, "%b %d, %Y at %I:%M %p UTC")
-        expiry = dt.replace(tzinfo=timezone.utc) + timedelta(minutes=minutes)
-        return expiry.astimezone(CN_TZ).strftime("%Y年%m月%d日 %H时%M分")
-    except:
-        return "未知"
+
+    renewal_time_str = renewal_time_str.strip()
+
+    formats = [
+        "%b %d, %Y at %I:%M %p UTC",
+        "%b %d, %Y, %I:%M %p UTC",
+    ]
+
+    for fmt in formats:
+        try:
+            dt = datetime.strptime(renewal_time_str, fmt)
+            expiry = dt.replace(
+                tzinfo=timezone.utc
+            ) + timedelta(minutes=minutes)
+
+            return expiry.astimezone(CN_TZ).strftime(
+                "%Y年%m月%d日 %H时%M分"
+            )
+        except:
+            pass
+
+    return "未知"
 
 def parse_renewal_datetime(time_str: str) -> Optional[datetime]:
     if not time_str:
         return None
-    try:
-        return datetime.strptime(time_str.strip(), "%b %d, %Y at %I:%M %p UTC")
-    except:
-        return None
+
+    time_str = (
+        time_str
+        .replace("\xa0", " ")
+        .strip()
+    )
+
+    formats = [
+        "%b %d, %Y at %I:%M %p UTC",
+        "%b %d, %Y, %I:%M %p UTC",
+        "%b %d, %Y at %I:%M %p",
+        "%b %d, %Y, %I:%M %p",
+    ]
+
+    for fmt in formats:
+        try:
+            return datetime.strptime(time_str, fmt)
+        except:
+            pass
+
+    return None
 
 def mask(s: str, show: int = 1) -> str:
     if not s: return "***"
@@ -483,6 +516,12 @@ def handle_turnstile(sb, idx: int, sid_f: str) -> bool:
     return False
 
 def scroll_and_get_renewal_info(sb) -> Tuple[str, str]:
+    """
+    获取：
+        renewal_time = Server last renewed
+        remain_time  = Expiry (Next Renewal)
+    """
+
     try:
         sb.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(1)
@@ -492,82 +531,140 @@ def scroll_and_get_renewal_info(sb) -> Tuple[str, str]:
     renewal_time = ""
     remain_time = ""
 
-    # =========================
-    # 1. Expiry (Next Renewal) —— 最稳定写法
-    # =========================
+    # ==========================================================
+    # 1. Server last renewed（全文匹配 UTC）
+    # ==========================================================
     try:
-        remain_time = sb.execute_script("""
-            const el = document.querySelector('div:has(span.font-medium)');
-            if (el) {
-                const span = el.querySelector('span.font-medium');
-                if (span) return span.innerText.trim();
-            }
+        renewal_time = sb.execute_script(r"""
+            const body = document.body ? document.body.innerText : "";
 
-            // fallback
-            const divs = document.querySelectorAll('div');
-            for (let d of divs) {
-                const t = d.innerText || "";
-                if (t.includes("Expiry") || t.includes("Next Renewal")) {
-                    const s = d.querySelector('span');
-                    if (s) return s.innerText.trim();
-                    return t;
+            let m = body.match(
+                /[A-Z][a-z]{2}\s+\d{1,2},\s+\d{4},\s+\d{1,2}:\d{2}\s+(AM|PM)\s+UTC/
+            );
+            if (m) return m[0];
+
+            m = body.match(
+                /[A-Z][a-z]{2}\s+\d{1,2},\s+\d{4}\s+at\s+\d{1,2}:\d{2}\s+(AM|PM)\s+UTC/
+            );
+            if (m) return m[0];
+
+            // 最后只要包含 UTC 就返回
+            m = body.match(/.{0,40}UTC/);
+            if (m) return m[0].trim();
+
+            return "";
+        """) or ""
+    except Exception:
+        renewal_time = ""
+
+    # ==========================================================
+    # 2. Expiry（DOM 查找）
+    # ==========================================================
+    try:
+        remain_time = sb.execute_script(r"""
+            const divs = document.querySelectorAll("div");
+
+            for (const div of divs) {
+
+                const txt = (div.textContent || "").trim();
+
+                if (
+                    txt.includes("Expiry") ||
+                    txt.includes("Next Renewal")
+                ) {
+
+                    const spans = div.querySelectorAll("span");
+
+                    for (const s of spans) {
+
+                        const t = (s.textContent || "").trim();
+
+                        if (
+                            /^\d+d/.test(t) ||
+                            /^\d+h/.test(t) ||
+                            /^\d+m/.test(t) ||
+                            /\d+d.*\d+h/.test(t) ||
+                            /\d+h.*\d+m/.test(t)
+                        ) {
+                            return t;
+                        }
+
+                    }
                 }
             }
 
             return "";
         """) or ""
-    except:
-        pass
+    except Exception:
+        remain_time = ""
 
-    # =========================
-    # 2. Server last renewed —— 精确抓 span.text-foreground
-    # =========================
-    try:
-        renewal_time = sb.execute_script("""
-            const el = document.querySelector('div:has(span.text-foreground)');
-            if (el && el.innerText.includes("Server last renewed")) {
-                const span = el.querySelector('span.text-foreground');
-                if (span) return span.innerText.trim();
-            }
-
-            // fallback：遍历
-            const divs = document.querySelectorAll('div');
-            for (let d of divs) {
-                const t = d.innerText || "";
-                if (t.includes("Server last renewed")) {
-                    const s = d.querySelector('span.text-foreground');
-                    if (s) return s.innerText.trim();
-                    return t;
-                }
-            }
-
-            return "";
-        """) or ""
-    except:
-        pass
-
-    # =========================
-    # 3. 最强兜底（regex）
-    # =========================
+    # ==========================================================
+    # 3. Page Source Regex 兜底
+    # ==========================================================
     if not renewal_time or not remain_time:
         try:
             page = sb.get_page_source()
 
-            if not remain_time:
-                m = re.search(r"Expiry.*?(\d+\s*d.*?\d*\s*h.*?\d*\s*m)", page)
-                if m:
-                    remain_time = m.group(1)
-
+            # ---------- renewal ----------
             if not renewal_time:
+
                 m = re.search(
-                    r"Server last renewed:.*?<span[^>]*>([^<]+)</span>",
+                    r"([A-Z][a-z]{2}\s+\d{1,2},\s+\d{4},\s+\d{1,2}:\d{2}\s+(?:AM|PM)\s+UTC)",
                     page
                 )
+
+                if not m:
+                    m = re.search(
+                        r"([A-Z][a-z]{2}\s+\d{1,2},\s+\d{4}\s+at\s+\d{1,2}:\d{2}\s+(?:AM|PM)\s+UTC)",
+                        page
+                    )
+
                 if m:
                     renewal_time = m.group(1).strip()
 
-        except:
-            pass
+            # ---------- remain ----------
+            if not remain_time:
+
+                m = re.search(
+                    r"(\d+d\s+\d+h\s+\d+m)",
+                    page
+                )
+
+                if not m:
+                    m = re.search(
+                        r"(\d+d\s+\d+h)",
+                        page
+                    )
+
+                if not m:
+                    m = re.search(
+                        r"(\d+h\s+\d+m)",
+                        page
+                    )
+
+                if not m:
+                    m = re.search(
+                        r"(\d+d)",
+                        page
+                    )
+
+                if m:
+                    remain_time = m.group(1).strip()
+
+        except Exception as e:
+            print(f"[WARN] Regex兜底失败: {e}")
+
+    # ==========================================================
+    # 4. Debug
+    # ==========================================================
+    print(f"[DEBUG] renewal_time_raw = {renewal_time}")
+    print(f"[DEBUG] remain_time_raw = {remain_time}")
+
+    if not renewal_time:
+        renewal_time = "未知"
+
+    if not remain_time:
+        remain_time = "未知"
 
     return renewal_time, remain_time
 
