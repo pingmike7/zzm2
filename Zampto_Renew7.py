@@ -705,7 +705,7 @@ def login(sb, user: str, pwd: str, idx: int) -> Tuple[bool, Optional[str]]:
             last_shot = shot(idx, f"login-{attempt}")
             safe_screenshot(sb, last_shot)
 
-            # ---------- 等待新表单 ----------
+            # ---------- 等待登录表单 ----------
             print("  [INFO] 等待登录表单...")
             try:
                 sb.wait_for_element('input#email', timeout=15)
@@ -735,89 +735,75 @@ def login(sb, user: str, pwd: str, idx: int) -> Tuple[bool, Optional[str]]:
 
             time.sleep(1)
 
-            # ---------- 点击登录 ----------
+            # ==========================================================
+            # ✅ 登录前 Turnstile（关键修复）
+            # ==========================================================
+            print("  [INFO] 检测登录前 Turnstile...")
+
+            for i in range(20):
+                has_ts = sb.execute_script('''
+                    return !!(
+                        document.querySelector("input[name='cf-turnstile-response']")
+                        || document.querySelector("iframe[src*='turnstile']")
+                        || document.querySelector("[id*='cf-chl-widget']")
+                    );
+                ''')
+                if has_ts:
+                    print("  [INFO] Turnstile 已加载")
+                    break
+                time.sleep(1)
+
+            # ---------- 处理 Turnstile ----------
+            for t_attempt in range(4):
+                print(f"  [INFO] 点击 Turnstile ({t_attempt+1})")
+
+                clicked = uc_click_with_timeout(sb, timeout=25)
+                time.sleep(4)
+
+                done = sb.execute_script('''
+                    var cf = document.querySelector("input[name='cf-turnstile-response']");
+                    return cf && cf.value && cf.value.length > 20;
+                ''')
+
+                if done:
+                    print("  [INFO] Turnstile 已通过")
+                    break
+
+                if not clicked:
+                    time.sleep(5)
+
+            # ---------- 未通过直接失败 ----------
+            if not sb.execute_script('''
+                var cf = document.querySelector("input[name='cf-turnstile-response']");
+                return cf && cf.value && cf.value.length > 20;
+            '''):
+                print("  [ERROR] Turnstile 未完成")
+                continue
+
+            # ==========================================================
+            # ✅ 点击登录
+            # ==========================================================
             print("  [INFO] 点击登录...")
             try:
                 sb.click('button[type="submit"]')
             except:
                 sb.execute_script("document.querySelector('button[type=\"submit\"]').click()")
 
-            # ---------- 等待 Turnstile ----------
-            print("  [INFO] 检测 Turnstile...")
-            turnstile_appeared = False
+            # ==========================================================
+            # ✅ 等待登录结果
+            # ==========================================================
+            print("  [INFO] 等待登录跳转...")
 
-            for _ in range(20):
-                # 登录成功
+            for _ in range(30):
                 if "dash.zampto.net" in sb.get_current_url() and "login" not in sb.get_current_url():
                     print("  [INFO] 登录成功")
                     handle_social_prompt(sb, idx)
                     return True, None
-
-                has_turnstile = sb.execute_script('''
-                    var frames = document.querySelectorAll('iframe');
-                    for (var i = 0; i < frames.length; i++) {
-                        var src = frames[i].src || '';
-                        if (src.includes('turnstile') || src.includes('challenges.cloudflare')) {
-                            return true;
-                        }
-                    }
-                    return !!document.querySelector('.cf-turnstile');
-                ''')
-
-                if has_turnstile:
-                    turnstile_appeared = True
-                    print("  [INFO] Turnstile 已出现")
-                    break
-
                 time.sleep(1)
 
-            # ---------- 处理 Turnstile ----------
-            if turnstile_appeared:
-                time.sleep(3)
-
-                for t_attempt in range(4):
-                    print(f"  [INFO] 点击 Turnstile ({t_attempt+1})")
-                    clicked = uc_click_with_timeout(sb, timeout=25)
-                    time.sleep(4)
-
-                    # 成功跳转
-                    if "dash.zampto.net" in sb.get_current_url() and "login" not in sb.get_current_url():
-                        print("  [INFO] 登录成功")
-                        handle_social_prompt(sb, idx)
-                        return True, None
-
-                    done = sb.execute_script('''
-                        var cf = document.querySelector("input[name='cf-turnstile-response']");
-                        return cf && cf.value && cf.value.length > 20;
-                    ''')
-
-                    if done:
-                        print("  [INFO] Turnstile 已通过")
-                        break
-
-                    if not clicked:
-                        time.sleep(5)
-
-                # 等待自动跳转
-                print("  [INFO] 等待验证完成...")
-                for _ in range(30):
-                    if "dash.zampto.net" in sb.get_current_url() and "login" not in sb.get_current_url():
-                        print("  [INFO] 登录成功")
-                        handle_social_prompt(sb, idx)
-                        return True, None
-                    time.sleep(1)
-
-            # ---------- 最终确认 ----------
-            print("  [INFO] 等待登录跳转...")
-            time.sleep(6)
-
+            # ---------- 截图 ----------
             last_shot = shot(idx, "login_result")
             safe_screenshot(sb, last_shot)
-
-            if "dash.zampto.net" in sb.get_current_url() and "login" not in sb.get_current_url():
-                print("  [INFO] 登录成功")
-                handle_social_prompt(sb, idx)
-                return True, last_shot
 
         except Exception as e:
             print(f"  [WARN] 尝试 {attempt+1} 异常: {e}")
