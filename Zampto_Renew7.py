@@ -669,146 +669,463 @@ def scroll_and_get_renewal_info(sb) -> Tuple[str, str]:
     return renewal_time, remain_time
 
 def login(sb, user: str, pwd: str, idx: int) -> Tuple[bool, Optional[str]]:
-    print(f"\n{'─'*40}")
-    print(f"  [INFO] 验证出口 IP...")
+    print(f"\n{'─' * 40}")
+    print("  [INFO] 验证出口 IP...")
+
     try:
-        ip_info = requests.get("https://api.ipify.org?format=json", timeout=10).json()
+        ip_info = requests.get(
+            "https://api.ipify.org?format=json",
+            timeout=10
+        ).json()
         print(f"  [INFO] 出口IP确认: {ip_info}")
-    except:
+    except Exception:
         pass
 
-    print(f"\n{'─'*40}")
-    print(f"  [INFO] 访问登录页...")
+    print(f"\n{'─' * 40}")
+    print("  [INFO] 访问登录页...")
+
     last_shot = None
 
     for attempt in range(3):
         try:
-            sb.uc_open_with_reconnect(AUTH_URL, reconnect_time=10)
-            time.sleep(5)
+            # ==========================================================
+            # 访问登录页
+            # ==========================================================
+            sb.uc_open_with_reconnect(
+                AUTH_URL,
+                reconnect_time=10
+            )
+            time.sleep(4)
 
-            # ---------- Cloudflare 整页 ----------
+            # ==========================================================
+            # Cloudflare 整页挑战
+            # ==========================================================
             if is_cloudflare_interstitial(sb):
+                print("  [INFO] 检测到 Cloudflare 整页挑战")
+
                 if not bypass_cloudflare_interstitial(sb, idx):
                     last_shot = shot(idx, "cf_failed")
                     safe_screenshot(sb, last_shot)
-                    if attempt < 2:
-                        continue
-                    return False, last_shot
-                time.sleep(4)
 
-            # ---------- 已登录 ----------
-            if "dash.zampto.net" in sb.get_current_url() and "login" not in sb.get_current_url():
+                    if attempt < 2:
+                        print("  [INFO] 准备重新尝试登录...")
+                        continue
+
+                    return False, last_shot
+
+                time.sleep(3)
+
+            # ==========================================================
+            # 检查是否已经登录
+            # ==========================================================
+            current_url = sb.get_current_url()
+
+            if (
+                "dash.zampto.net" in current_url
+                and "login" not in current_url
+            ):
                 print("  [INFO] 已登录")
                 handle_social_prompt(sb, idx)
                 return True, None
 
+            # ==========================================================
+            # 登录页截图
+            # ==========================================================
             last_shot = shot(idx, f"login-{attempt}")
             safe_screenshot(sb, last_shot)
 
-            # ---------- 等待登录表单 ----------
+            # ==========================================================
+            # 等待登录表单
+            # ==========================================================
             print("  [INFO] 等待登录表单...")
+
             try:
-                sb.wait_for_element('input#email', timeout=15)
-            except:
+                sb.wait_for_element(
+                    "#email",
+                    timeout=15
+                )
+            except Exception:
                 print("  [ERROR] 未检测到登录表单")
+
                 if attempt < 2:
                     time.sleep(5)
                     continue
+
                 return False, last_shot
 
-            # ---------- 输入账号密码 ----------
+            # ==========================================================
+            # 填写邮箱
+            # ==========================================================
             print("  [INFO] 填写邮箱...")
+
             try:
-                sb.clear('input#email')
-                sb.type('input#email', user)
-            except:
-                sb.execute_script("document.querySelector('#email').value = arguments[0];", user)
+                sb.click("#email")
+                sb.clear("#email")
+                sb.type("#email", user)
+            except Exception as e:
+                print(f"  [WARN] 普通方式填写邮箱失败: {e}")
 
-            time.sleep(1)
+            # 检查邮箱是否真的写入
+            try:
+                email_val = sb.get_attribute(
+                    "#email",
+                    "value"
+                ) or ""
+            except Exception:
+                email_val = ""
 
+            # ==========================================================
+            # 邮箱 JS fallback
+            # ==========================================================
+            if not email_val:
+                print("  [WARN] 邮箱未写入，使用 JS fallback...")
+
+                try:
+                    sb.execute_script("""
+                        var input = document.querySelector('#email');
+
+                        if (input) {
+                            var setter = Object.getOwnPropertyDescriptor(
+                                window.HTMLInputElement.prototype,
+                                'value'
+                            ).set;
+
+                            setter.call(input, arguments[0]);
+
+                            input.dispatchEvent(
+                                new Event('input', {
+                                    bubbles: true
+                                })
+                            );
+
+                            input.dispatchEvent(
+                                new Event('change', {
+                                    bubbles: true
+                                })
+                            );
+
+                            input.dispatchEvent(
+                                new Event('blur', {
+                                    bubbles: true
+                                })
+                            );
+                        }
+                    """, user)
+                except Exception as e:
+                    print(f"  [ERROR] JS 填写邮箱失败: {e}")
+
+            time.sleep(0.8)
+
+            # ==========================================================
+            # 最终确认邮箱
+            # ==========================================================
+            try:
+                email_val = sb.get_attribute(
+                    "#email",
+                    "value"
+                ) or ""
+            except Exception:
+                email_val = ""
+
+            if email_val:
+                print("  [INFO] 邮箱填写成功")
+            else:
+                print("  [ERROR] 邮箱仍为空")
+                last_shot = shot(idx, "email_empty")
+                safe_screenshot(sb, last_shot)
+
+                if attempt < 2:
+                    time.sleep(3)
+                    continue
+
+                return False, last_shot
+
+            # ==========================================================
+            # 填写密码
+            # ==========================================================
             print("  [INFO] 填写密码...")
+
             try:
-                sb.clear('input#password')
-                sb.type('input#password', pwd)
-            except:
-                sb.execute_script("document.querySelector('#password').value = arguments[0];", pwd)
+                sb.click("#password")
+                sb.clear("#password")
+                sb.type("#password", pwd)
+            except Exception as e:
+                print(f"  [WARN] 普通方式填写密码失败: {e}")
+
+            # 检查密码是否真的写入
+            try:
+                pwd_val = sb.get_attribute(
+                    "#password",
+                    "value"
+                ) or ""
+            except Exception:
+                pwd_val = ""
+
+            # ==========================================================
+            # 密码 JS fallback
+            # ==========================================================
+            if not pwd_val:
+                print("  [WARN] 密码未写入，使用 JS fallback...")
+
+                try:
+                    sb.execute_script("""
+                        var input = document.querySelector('#password');
+
+                        if (input) {
+                            var setter = Object.getOwnPropertyDescriptor(
+                                window.HTMLInputElement.prototype,
+                                'value'
+                            ).set;
+
+                            setter.call(input, arguments[0]);
+
+                            input.dispatchEvent(
+                                new Event('input', {
+                                    bubbles: true
+                                })
+                            );
+
+                            input.dispatchEvent(
+                                new Event('change', {
+                                    bubbles: true
+                                })
+                            );
+
+                            input.dispatchEvent(
+                                new Event('blur', {
+                                    bubbles: true
+                                })
+                            );
+                        }
+                    """, pwd)
+                except Exception as e:
+                    print(f"  [ERROR] JS 填写密码失败: {e}")
 
             time.sleep(1)
 
             # ==========================================================
-            # ✅ 登录前 Turnstile（关键修复）
+            # 检查密码是否成功填写
+            # ==========================================================
+            try:
+                pwd_val = sb.get_attribute(
+                    "#password",
+                    "value"
+                ) or ""
+            except Exception:
+                pwd_val = ""
+
+            if pwd_val:
+                print("  [INFO] 密码填写成功")
+            else:
+                print("  [ERROR] 密码仍为空")
+                last_shot = shot(idx, "password_empty")
+                safe_screenshot(sb, last_shot)
+
+                if attempt < 2:
+                    time.sleep(3)
+                    continue
+
+                return False, last_shot
+
+            # ==========================================================
+            # 检测登录前 Turnstile
             # ==========================================================
             print("  [INFO] 检测登录前 Turnstile...")
 
-            for i in range(20):
-                has_ts = sb.execute_script('''
-                    return !!(
-                        document.querySelector("input[name='cf-turnstile-response']")
-                        || document.querySelector("iframe[src*='turnstile']")
-                        || document.querySelector("[id*='cf-chl-widget']")
-                    );
-                ''')
-                if has_ts:
-                    print("  [INFO] Turnstile 已加载")
-                    break
-                time.sleep(1)
-
-            # ---------- 处理 Turnstile ----------
-            for t_attempt in range(4):
-                print(f"  [INFO] 点击 Turnstile ({t_attempt+1})")
-
-                clicked = uc_click_with_timeout(sb, timeout=25)
-                time.sleep(4)
-
-                done = sb.execute_script('''
-                    var cf = document.querySelector("input[name='cf-turnstile-response']");
-                    return cf && cf.value && cf.value.length > 20;
-                ''')
-
-                if done:
-                    print("  [INFO] Turnstile 已通过")
-                    break
-
-                if not clicked:
-                    time.sleep(5)
-
-            # ---------- 未通过直接失败 ----------
-            if not sb.execute_script('''
-                var cf = document.querySelector("input[name='cf-turnstile-response']");
-                return cf && cf.value && cf.value.length > 20;
-            '''):
-                print("  [ERROR] Turnstile 未完成")
-                continue
+            has_ts = sb.execute_script("""
+                return !!(
+                    document.querySelector(
+                        "input[name='cf-turnstile-response']"
+                    )
+                    ||
+                    document.querySelector(
+                        "iframe[src*='turnstile']"
+                    )
+                    ||
+                    document.querySelector(
+                        "[id*='cf-chl-widget']"
+                    )
+                );
+            """)
 
             # ==========================================================
-            # ✅ 点击登录
+            # 处理 Turnstile
+            # ==========================================================
+            if has_ts:
+                print("  [INFO] 检测到 Turnstile，尝试处理...")
+
+                turnstile_done = False
+
+                for t_attempt in range(3):
+                    print(
+                        f"  [INFO] Turnstile 点击 "
+                        f"({t_attempt + 1}/3)"
+                    )
+
+                    clicked = uc_click_with_timeout(
+                        sb,
+                        timeout=20
+                    )
+
+                    time.sleep(3)
+
+                    done = sb.execute_script("""
+                        var cf = document.querySelector(
+                            "input[name='cf-turnstile-response']"
+                        );
+
+                        return !!(
+                            cf &&
+                            cf.value &&
+                            cf.value.length > 20
+                        );
+                    """)
+
+                    if done:
+                        print("  [INFO] Turnstile 已通过")
+                        turnstile_done = True
+                        break
+
+                    if not clicked:
+                        print("  [WARN] Turnstile 点击未成功")
+                        time.sleep(3)
+
+                if not turnstile_done:
+                    print(
+                        "  [WARN] Turnstile 未检测到完成状态，"
+                        "继续尝试提交"
+                    )
+
+            else:
+                print("  [INFO] 未检测到登录 Turnstile")
+
+            # ==========================================================
+            # 点击登录
             # ==========================================================
             print("  [INFO] 点击登录...")
+
             try:
-                sb.click('button[type="submit"]')
-            except:
-                sb.execute_script("document.querySelector('button[type=\"submit\"]').click()")
+                sb.click("button[type='submit']")
+                print("  [INFO] 登录按钮点击成功")
+
+            except Exception as e:
+                print(
+                    f"  [WARN] Selenium 点击登录失败: {e}"
+                )
+
+                try:
+                    sb.execute_script("""
+                        var btn = document.querySelector(
+                            "button[type='submit']"
+                        );
+
+                        if (btn) {
+                            btn.click();
+                        }
+                    """)
+                    print("  [INFO] JS 点击登录按钮成功")
+
+                except Exception as js_e:
+                    print(
+                        f"  [ERROR] JS 点击登录失败: {js_e}"
+                    )
+
+                    last_shot = shot(
+                        idx,
+                        "login_button_failed"
+                    )
+                    safe_screenshot(
+                        sb,
+                        last_shot
+                    )
+
+                    if attempt < 2:
+                        time.sleep(3)
+                        continue
+
+                    return False, last_shot
 
             # ==========================================================
-            # ✅ 等待登录结果
+            # 等待登录结果
             # ==========================================================
             print("  [INFO] 等待登录跳转...")
 
-            for _ in range(30):
-                if "dash.zampto.net" in sb.get_current_url() and "login" not in sb.get_current_url():
-                    print("  [INFO] 登录成功")
-                    handle_social_prompt(sb, idx)
-                    return True, None
+            login_success = False
+
+            for wait_count in range(30):
+                current_url = sb.get_current_url()
+
+                if (
+                    "dash.zampto.net" in current_url
+                    and "login" not in current_url
+                ):
+                    login_success = True
+                    break
+
                 time.sleep(1)
 
-            # ---------- 截图 ----------
-            last_shot = shot(idx, "login_result")
-            safe_screenshot(sb, last_shot)
+            # ==========================================================
+            # 登录成功
+            # ==========================================================
+            if login_success:
+                print("  [INFO] 登录成功")
+
+                handle_social_prompt(
+                    sb,
+                    idx
+                )
+
+                return True, None
+
+            # ==========================================================
+            # 登录失败截图
+            # ==========================================================
+            print("  [WARN] 登录后未发生跳转")
+
+            last_shot = shot(
+                idx,
+                f"login_result_{attempt}"
+            )
+
+            safe_screenshot(
+                sb,
+                last_shot
+            )
+
+            # ==========================================================
+            # 输出当前页面状态，方便排查
+            # ==========================================================
+            try:
+                current_url = sb.get_current_url()
+                print(
+                    f"  [DEBUG] 当前 URL: {current_url}"
+                )
+            except Exception:
+                pass
+
+            if attempt < 2:
+                print("  [INFO] 准备重新尝试登录...")
+                time.sleep(4)
 
         except Exception as e:
-            print(f"  [WARN] 尝试 {attempt+1} 异常: {e}")
+            print(
+                f"  [WARN] 尝试 {attempt + 1} 异常: {e}"
+            )
+
+            last_shot = shot(
+                idx,
+                f"login_exception_{attempt}"
+            )
+
+            safe_screenshot(
+                sb,
+                last_shot
+            )
+
             if attempt < 2:
-                time.sleep(5)
+                time.sleep(4)
+
+    print("  [ERROR] 3次登录尝试均失败")
 
     return False, last_shot
 
